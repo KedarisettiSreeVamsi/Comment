@@ -1,9 +1,9 @@
 import abc
 
 from django.contrib.auth.mixins import LoginRequiredMixin, AccessMixin
-from django.contrib import messages
 from django.core.exceptions import ImproperlyConfigured
-from django.http import HttpResponseBadRequest, HttpResponseForbidden
+from django.http import HttpResponseBadRequest, HttpResponseForbidden, JsonResponse
+from django.views.generic import FormView
 
 from comment.conf import settings
 from comment.utils import is_comment_admin, is_comment_moderator
@@ -11,6 +11,30 @@ from comment.validators import ValidatorMixin
 from comment.messages import ErrorMessage, FlagError, FollowError
 from comment.service.email import DABEmailService
 from comment.messages import EmailInfo
+from comment.forms import CommentForm
+from comment.context import DABContext
+
+
+class DABResponseData:
+    status = 200
+    data = None
+    error = None
+    anonymous = False
+    msg = None
+
+    def json(self):
+        return {
+            'data': self.data,
+            'error': self.error,
+            'anonymous': self.anonymous,
+            'msg': self.msg
+        }
+
+
+class UTF8JsonResponse(JsonResponse):
+    def __init__(self, *args, json_dumps_params=None, **kwargs):
+        json_dumps_params = {"ensure_ascii": False, **(json_dumps_params or {})}
+        super().__init__(*args, json_dumps_params=json_dumps_params, **kwargs)
 
 
 class AJAXRequiredMixin:
@@ -32,7 +56,23 @@ class BaseCommentMixin(LoginRequiredMixin, BasePermission):
     pass
 
 
-class CommentCreateMixin:
+class BaseCommentView(FormView, DABResponseData):
+    form_class = CommentForm
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['comment_form'] = context.pop('form')
+        # context.update(get_comment_context_data(self.request))
+        context.update(DABContext(self.request))
+        return context
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['request'] = self.request
+        return kwargs
+
+
+class CommentCreateMixin(BaseCommentView):
     email_service = None
 
     def _initialize_email_service(self, comment, request):
@@ -52,11 +92,10 @@ class CommentCreateMixin:
     def _handle_anonymous(self, comment, request, api=False):
         self._initialize_email_service(comment, request)
         self.email_service.send_confirmation_request(api=api)
-        if not api:
-            messages.info(request, EmailInfo.CONFIRMATION_SENT)
+        self.anonymous = True
+        self.msg = EmailInfo.CONFIRMATION_SENT
 
     def perform_create(self, comment, request, api=False):
-
         if settings.COMMENT_ALLOW_ANONYMOUS and not comment.user:
             self._handle_anonymous(comment, request, api)
         else:
